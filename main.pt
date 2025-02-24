@@ -1,0 +1,139 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.metrics import accuracy_score
+
+# Генерация сигнала
+def generate_signal(duration=1, sr=16000):
+    t = np.linspace(0, duration, int(sr*duration), endpoint=False)
+    freqs = np.random.uniform(100, 4000, 3)
+    signal_clean = sum(np.sin(2*np.pi*f*t) for f in freqs)
+    noise = np.random.normal(0, np.sqrt(0.01), len(t))
+    return t, signal_clean + noise, freqs
+
+# Полосовой фильтр
+def butter_bandpass(lowcut, highcut, fs, order=5):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = signal.butter(order, [low, high], btype='band')
+    return b, a
+
+def apply_filter(data, lowcut, highcut, fs=16000):
+    b, a = butter_bandpass(lowcut, highcut, fs)
+    y = signal.filtfilt(b, a, data)
+    return y
+
+# Извлечение признаков
+def spectral_features(sig, sr=16000):
+    fft = np.fft.rfft(sig)
+    magnitudes = np.abs(fft)
+    freqs = np.fft.rfftfreq(len(sig), 1/sr)
+    
+    if np.sum(magnitudes) == 0:
+        return 0.0, 0.0
+    
+    centroid = np.sum(freqs * magnitudes) / np.sum(magnitudes)
+    spread = np.sqrt(np.sum((freqs - centroid)**2 * magnitudes) / np.sum(magnitudes))
+    return np.array([centroid, spread])
+
+# Генерация данных
+def generate_dataset(num_samples=5000):
+    X = []
+    y = []
+    
+    for _ in range(num_samples):
+        # Генерируем целевой диапазон
+        f_low = np.random.uniform(100, 3000)
+        f_high = f_low + np.random.uniform(100, 1000)
+        
+        # Генерируем сигнал
+        t, sig, freqs = generate_signal()
+        
+        # Создаем метку (1 если хотя бы одна частота в диапазоне)
+        label = 1 if any((f >= f_low) & (f <= f_high) for f in freqs) else 0
+        
+        # Применяем фильтр
+        filtered = apply_filter(sig, f_low, f_high)
+        
+        # Извлекаем признаки
+        features = spectral_features(filtered)
+        
+        X.append(features)
+        y.append(label)
+    
+    return np.array(X), np.array(y)
+
+# Нейросетевая модель
+class FrequencyClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(2, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 1)
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        return self.sigmoid(self.fc3(x))
+
+# Обучение модели
+def train_model(X, y):
+    # Разделение данных
+    split = int(0.8 * len(X))
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
+    
+    # Конвертация в тензоры
+    X_train = torch.FloatTensor(X_train)
+    y_train = torch.FloatTensor(y_train).unsqueeze(1)
+    X_test = torch.FloatTensor(X_test)
+    y_test = torch.FloatTensor(y_test).unsqueeze(1)
+    
+    # Инициализация модели
+    model = FrequencyClassifier()
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    # Цикл обучения
+    for epoch in range(100):
+        optimizer.zero_grad()
+        outputs = model(X_train)
+        loss = criterion(outputs, y_train)
+        loss.backward()
+        optimizer.step()
+        
+        if epoch % 10 == 0:
+            with torch.no_grad():
+                test_preds = model(X_test)
+                test_loss = criterion(test_preds, y_test)
+                acc = accuracy_score(y_test.numpy(), test_preds.numpy() > 0.5)
+                print(f'Epoch {epoch}, Loss: {loss.item():.4f}, Test Acc: {acc:.4f}')
+    
+    return model
+
+# Функция обработки сигнала
+def process_audio_signal(f_low: float, f_high: float) -> tuple[np.ndarray, np.ndarray]:
+    t, sig, _ = generate_signal()
+    filtered = apply_filter(sig, f_low, f_high)
+    features = spectral_features(filtered)
+    return filtered, features
+
+# Пример использования
+if __name__ == "__main__":
+    # Генерация данных
+    X, y = generate_dataset(5000)
+    
+    # Обучение модели
+    model = train_model(X, y)
+    
+    # Тестирование
+    test_signal, test_features = process_audio_signal(1000, 2000)
+    with torch.no_grad():
+        prediction = model(torch.FloatTensor(test_features))
+        print(f"Prediction: {prediction.item():.4f}")
